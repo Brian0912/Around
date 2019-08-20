@@ -1,13 +1,11 @@
 package main
 
 import (
-	"cloud.google.com/go/storage"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/olivere/elastic"
 	"github.com/pborman/uuid"
-	"io"
 	"log"
 	"net/http"
 	"reflect"
@@ -19,8 +17,7 @@ const (
 	POST_INDEX = "post"
 	POST_TYPE  = "post"
 
-	ES_URL      = "http://IP:9200/"
-	BUCKET_NAME = "BUCKET"
+	ES_URL = "http://34.68.120.103:9200/"
 )
 
 type Location struct {
@@ -33,7 +30,6 @@ type Post struct {
 	User     string   `json:"user"`
 	Message  string   `json:"message"`
 	Location Location `json:"location"`
-	Url      string   `json:"url"`
 }
 
 func main() {
@@ -126,85 +122,26 @@ func readFromES(lat, lon float64, ran string) ([]Post, error) {
 	return posts, nil
 }
 
-func saveToGCS(r io.Reader, bucketName, objectName string) (*storage.ObjectAttrs, error) {
-	ctx := context.Background() // more on context: https://blog.golang.org/context
-	// Creates a client.
-	client, err := storage.NewClient(ctx)
-
-	if err != nil {
-		return nil, err
-	}
-
-	bucket := client.Bucket(bucketName)
-
-	if _, err := bucket.Attrs(ctx); err != nil {
-		return nil, err
-	}
-
-	object := bucket.Object(objectName)
-	wc := object.NewWriter(ctx)
-
-	if _, err = io.Copy(wc, r); err != nil {
-		return nil, err
-	}
-
-	if err := wc.Close(); err != nil {
-		return nil, err
-	}
-
-	if err = object.ACL().Set(ctx, storage.AllUsers, storage.RoleReader); err != nil {
-		return nil, err
-	}
-
-	attrs, err := object.Attrs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	fmt.Printf("Image is saved to GCS: %s\n", attrs.MediaLink)
-	return attrs, nil
-}
-
 func handlerPost(w http.ResponseWriter, r *http.Request) {
 	// Parse from body of request to get a json object.
 	fmt.Println("Received one post request")
-
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+	if r.Method == "OPTIONS" {
+		return
+	}
 
-	lat, _ := strconv.ParseFloat(r.FormValue("lat"), 64)
-	lon, _ := strconv.ParseFloat(r.FormValue("lon"), 64)
-
-	p := &Post{
-		User:    r.FormValue("user"),
-		Message: r.FormValue("message"),
-		Location: Location{
-			Lat: lat,
-			Lon: lon,
-		},
+	decoder := json.NewDecoder(r.Body)
+	var p Post
+	if err := decoder.Decode(&p); err != nil {
+		http.Error(w, "Cannot decode post data from client", http.StatusBadRequest)
+		fmt.Printf("Cannot decode post data from client %v.\n", err)
+		return
 	}
 
 	id := uuid.New()
-	file, _, err := r.FormFile("image")
-
-	if err != nil {
-		http.Error(w, "Image is not available", http.StatusBadRequest)
-		fmt.Printf("Image is not available %v.\n", err)
-		return
-	}
-
-	attrs, err := saveToGCS(file, BUCKET_NAME, id)
-
-	if err != nil {
-		http.Error(w, "Failed to save image to GCS", http.StatusInternalServerError)
-		fmt.Printf("Failed to save image to GCS %v.\n", err)
-		return
-	}
-
-	p.Url = attrs.MediaLink
-	err = saveToES(p, id)
-
+	err := saveToES(&p, id)
 	if err != nil {
 		http.Error(w, "Failed to save post to ElasticSearch", http.StatusInternalServerError)
 		fmt.Printf("Failed to save post to ElasticSearch %v.\n", err)
