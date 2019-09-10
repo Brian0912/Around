@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/olivere/elastic"
 	"github.com/pborman/uuid"
+	"github.com/go-redis/redis"
 	"io"
 	"log"
 	"net/http"
@@ -22,9 +23,10 @@ const (
 	DISTANCE   = "200km"
 	POST_INDEX = "post"
 	POST_TYPE  = "post"
-
+	ENABLE_MEMCACHE = true
 	ES_URL      = "http://34.66.60.246:9200"
 	BUCKET_NAME = "post-images-250321"
+	REDIS_URL   = ""
 )
 
 type Location struct {
@@ -38,8 +40,6 @@ type Post struct {
 	Message  string   `json:"message"`
 	Location Location `json:"location"`
 	Url      string   `json:"url"`
-	//Type string `json:"type"`
-	//Face float64 `json:"face"`
 }
 
 var (
@@ -74,9 +74,6 @@ func main() {
 	r.Handle("/signup", http.HandlerFunc(handlerSignup)).Methods("POST", "OPTIONS")
 	r.Handle("/login", http.HandlerFunc(handlerLogin)).Methods("POST", "OPTIONS")
 	http.Handle("/", r)
-
-	//http.HandleFunc("/post", handlerPost)
-	//http.HandleFunc("/search", handlerSearch)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
@@ -215,7 +212,7 @@ func saveToGCS(r io.Reader, bucketName, objectName string) (*storage.ObjectAttrs
 	return attrs, nil
 }
 
-/**
+
 // Save a post to BigTable
 func saveToBigTable(p *Post, id string) {
 	ctx := context.Background()
@@ -237,7 +234,6 @@ func saveToBigTable(p *Post, id string) {
 	fmt.Printf("Post is saved to BigTable: %s\n", p.Message)
 	return nil
 }
-*/
 
 func handlerPost(w http.ResponseWriter, r *http.Request) {
 	// Parse from body of request to get a json object.
@@ -313,14 +309,13 @@ func handlerPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmt.Printf("Saved one post to ElasticSearch: %s", p.Message)
-	/**
+
 	err = saveToBigTable(p, id)
 	if err != nil {
 		http.Error(w, "Failed to save post to BigTable", http.StatusInternalServerError)
 		fmt.Printf("Failed to save post to BigTable %v.\n", err)
 		return
 	}
-	*/
 }
 
 func handlerSearch(w http.ResponseWriter, r *http.Request) {
@@ -342,10 +337,24 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 		ran = val + "km"
 	}
 
-	//fmt.Println("range is ", ran)
-	//query := elastic.NewGeoDistanceQuery("location")
-	//query = query.Distance(ran).Lat(lat).Lon(lon)
-	//posts, err := readFromES(query)
+	key := r.URL.Query().Get("lat") + ":" + r.URL.Query().Get("lon") + ":" + ran
+    if ENABLE_MEMCACHE {
+             rs_client := redis.NewClient(&redis.Options{
+                    Addr:     REDIS_URL,
+                    Password: "", // no password set
+                    DB:       0,  // use default DB
+             })
+
+             val, err := rs_client.Get(key).Result()
+             if err != nil {
+                    fmt.Printf("Redis cannot find the key %s as %v.\n", key, err)
+             } else {
+                    fmt.Printf("Redis find the key %s.\n", key)
+                    w.Header().Set("Content-Type", "application/json")
+                    w.Write([]byte(val))
+                    return
+             }
+    }
 
 	posts, err := readFromES(lat, lon, ran)
 	if err != nil {
@@ -361,10 +370,26 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if ENABLE_MEMCACHE {
+		//Student question: please complete the Set here
+		rs_client := redis.NewClient(&redis.Options{
+			Addr:     REDIS_URL,
+			Password: "", // no password set
+			DB:       0,  // use default DB
+	 	})
+
+		// Set the cache expiration to be 30 seconds
+		err := rs_client.Set(key, string(js), time.Second*30).Err()
+		if err != nil {
+				fmt.Printf("Redis cannot save the key %s as %v.\n", key, err)
+		}
+  }
+
+
 	w.Write(js)
 }
 
-/**
+
 func handlerCluster(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Received one cluster request")
 	w.Header().Set("Content-Type", "application/json")
@@ -389,4 +414,4 @@ func handlerCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Write(js)
 }
-*/
+
